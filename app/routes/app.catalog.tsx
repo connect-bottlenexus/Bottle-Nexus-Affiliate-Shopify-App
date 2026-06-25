@@ -13,6 +13,7 @@ import {
   getCaptainProducts,
   type CatalogFilters,
   type CatalogProduct,
+  type CatalogSalesTier,
 } from "../lib/catalog.server";
 import {
   getProductImportStatuses,
@@ -88,6 +89,7 @@ export default function Catalog() {
   const shopify = useAppBridge();
   const [searchParams] = useSearchParams();
   const [selectedProducts, setSelectedProducts] = useState<string[]>([]);
+  const [lastTierToast, setLastTierToast] = useState<string | null>(null);
   const selected = useMemo(() => new Set(selectedProducts), [selectedProducts]);
   const allSelected =
     products.length > 0 && selectedProducts.length === products.length;
@@ -127,6 +129,18 @@ export default function Catalog() {
       formData.append("productIds", productId);
     });
     fetcher.submit(formData, { method: "POST" });
+  }
+
+  function showTierToast(product: CatalogProduct) {
+    const key = `${product.id}-${product.salesTier}`;
+    if (lastTierToast === key) {
+      return;
+    }
+
+    setLastTierToast(key);
+    shopify.toast.show(
+      `${product.salesTier} ranking: ${tierDescription(product.salesTier)} ${product.salesLast90Days} bottle(s) sold in the past 90 days.`,
+    );
   }
 
   return (
@@ -238,8 +252,8 @@ export default function Catalog() {
               >
                 <option value="">All imports</option>
                 <option value="imported">Imported</option>
-                  <option value="not_imported">Not imported</option>
-                </select>
+                <option value="not_imported">Not imported</option>
+              </select>
               <button style={styles.iconButton} title="Apply filters" type="submit">
                 Apply
               </button>
@@ -262,6 +276,7 @@ export default function Catalog() {
                     </th>
                     <th style={styles.productHeaderCell}>Product</th>
                     <th style={styles.headerCell}>Status</th>
+                    <th style={styles.headerCell}>Rank</th>
                     <th style={styles.headerCell}>Inventory</th>
                     <th style={styles.numericHeaderCell}>Variants</th>
                     <th style={styles.headerCell}>Product type</th>
@@ -307,6 +322,17 @@ export default function Catalog() {
                           <span style={productStatusStyle(product.status)}>
                             {capitalize(product.status)}
                           </span>
+                        </td>
+                        <td style={styles.cell}>
+                          <button
+                            aria-label={`Ranking ${product.salesTier}: ${tierDescription(product.salesTier)}`}
+                            onFocus={() => showTierToast(product)}
+                            onMouseEnter={() => showTierToast(product)}
+                            style={tierBadgeStyle(product.salesTier)}
+                            type="button"
+                          >
+                            {product.salesTier}
+                          </button>
                         </td>
                         <td style={styles.cell}>
                           {product.totalInventory ?? "Not tracked"}
@@ -464,6 +490,33 @@ function productStatusStyle(status: string): CSSProperties {
   }
 
   return styles.archivedBadge;
+}
+
+function tierDescription(tier: CatalogSalesTier) {
+  const descriptions: Record<CatalogSalesTier, string> = {
+    A: "Top seller, 601+ bottles.",
+    B: "Strong seller, 401-600 bottles.",
+    C: "Steady seller, 301-400 bottles.",
+    D: "Developing seller, 101-300 bottles.",
+    E: "Low-volume seller, 0-100 bottles.",
+  };
+
+  return descriptions[tier];
+}
+
+function tierBadgeStyle(tier: CatalogSalesTier): CSSProperties {
+  const colors: Record<CatalogSalesTier, { background: string; color: string }> = {
+    A: { background: "#008060", color: "#ffffff" },
+    B: { background: "#95c9b4", color: "#0f2e24" },
+    C: { background: "#f0c14b", color: "#2b2508" },
+    D: { background: "#f4a36c", color: "#3b1d06" },
+    E: { background: "#e4e5e7", color: "#303030" },
+  };
+
+  return {
+    ...styles.tierBadge,
+    ...colors[tier],
+  };
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -692,6 +745,19 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "12px",
     lineHeight: "18px",
     padding: "0 8px",
+  },
+  tierBadge: {
+    border: 0,
+    borderRadius: "999px",
+    cursor: "help",
+    display: "inline-flex",
+    fontFamily: "inherit",
+    fontSize: "12px",
+    fontWeight: 700,
+    justifyContent: "center",
+    lineHeight: "20px",
+    minWidth: "28px",
+    padding: "0 9px",
   },
   statusOk: {
     color: "#008060",

@@ -139,9 +139,9 @@ export async function importProducts(
   for (const product of products) {
     const existingProduct = await findProductByHandle(admin, product.handle);
     if (existingProduct?.id) {
+      const productErrors = await updateImportedProduct(admin, existingProduct.id, product);
       const inventoryErrors = await syncProductInventory(admin, existingProduct.id, product);
-      const visibilityErrors = await ensureProductVisible(admin, existingProduct.id);
-      const errors = [...inventoryErrors, ...visibilityErrors];
+      const errors = [...productErrors, ...inventoryErrors];
       results.push({
         ok: errors.length === 0,
         id: existingProduct.id,
@@ -150,7 +150,7 @@ export async function importProducts(
         title: product.title,
         message: errors.length
           ? `${product.title} already exists, but sync needs review: ${errors.join("; ")}`
-          : `${product.title} already exists, inventory is synced, and it is published to Online Store.`,
+          : `${product.title} already exists, category and inventory are synced, and it is saved as draft.`,
       });
       continue;
     }
@@ -221,7 +221,8 @@ async function createProduct(
           descriptionHtml: sourceProduct.descriptionHtml,
           vendor: sourceProduct.vendor,
           productType: sourceProduct.productType,
-          status: "ACTIVE",
+          category: sourceProduct.category?.id,
+          status: "DRAFT",
           tags: sourceProduct.tags,
           productOptions: sourceProduct.options.map((option) => ({
             name: option.name,
@@ -282,37 +283,28 @@ async function createProduct(
     };
   }
 
-  const visibilityErrors = await ensureProductVisible(admin, createdProduct.id);
-  if (visibilityErrors.length) {
-    return {
-      ok: false,
-      id: createdProduct.id,
-      message: `${sourceProduct.title} was created, but publishing needs review: ${visibilityErrors.join("; ")}`,
-    };
-  }
-
   return {
     ok: true,
     id: createdProduct.id,
-    message: `${sourceProduct.title} imported and published to Online Store.`,
+    message: `${sourceProduct.title} imported as draft with category and inventory synced.`,
   };
 }
 
-async function ensureProductVisible(admin: AdminClient, productId: string) {
-  const statusErrors = await activateProduct(admin, productId);
-  const publishErrors = await publishProduct(admin, productId);
-
-  return [...statusErrors, ...publishErrors];
-}
-
-async function activateProduct(admin: AdminClient, productId: string) {
+async function updateImportedProduct(
+  admin: AdminClient,
+  productId: string,
+  sourceProduct: CatalogProduct,
+) {
   const response = await admin.graphql(
     `#graphql
-      mutation ActivateProduct($product: ProductUpdateInput!) {
+      mutation UpdateImportedProduct($product: ProductUpdateInput!) {
         productUpdate(product: $product) {
           product {
             id
             status
+            category {
+              id
+            }
           }
           userErrors {
             field
@@ -324,7 +316,11 @@ async function activateProduct(admin: AdminClient, productId: string) {
       variables: {
         product: {
           id: productId,
-          status: "ACTIVE",
+          vendor: sourceProduct.vendor,
+          productType: sourceProduct.productType,
+          category: sourceProduct.category?.id,
+          tags: sourceProduct.tags,
+          status: "DRAFT",
         },
       },
     },
@@ -335,61 +331,6 @@ async function activateProduct(admin: AdminClient, productId: string) {
     ...extractTopLevelErrors(json.errors),
     ...extractErrors(json.data?.productUpdate?.userErrors),
   ];
-}
-
-async function publishProduct(admin: AdminClient, productId: string) {
-  const publicationResult = await getPublicationIds(admin);
-  if (publicationResult.errors.length) {
-    return publicationResult.errors;
-  }
-  if (!publicationResult.ids.length) {
-    return ["No Shopify publications were found for this store."];
-  }
-
-  const response = await admin.graphql(
-    `#graphql
-      mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
-        publishablePublish(id: $id, input: $input) {
-          userErrors {
-            field
-            message
-          }
-        }
-      }`,
-    {
-      variables: {
-        id: productId,
-        input: publicationResult.ids.map((publicationId) => ({
-          publicationId,
-        })),
-      },
-    },
-  );
-  const json = await response.json();
-
-  return [
-    ...extractTopLevelErrors(json.errors),
-    ...extractErrors(json.data?.publishablePublish?.userErrors),
-  ];
-}
-
-async function getPublicationIds(admin: AdminClient) {
-  const response = await admin.graphql(`#graphql
-    query ProductPublications {
-      publications(first: 20) {
-        nodes {
-          id
-        }
-      }
-    }`);
-  const json = await response.json();
-
-  return {
-    ids: ((json.data?.publications?.nodes ?? []) as Array<{ id: string }>)
-      .map((publication) => publication.id)
-      .filter(Boolean),
-    errors: extractTopLevelErrors(json.errors),
-  };
 }
 
 async function createVariants(

@@ -31,13 +31,24 @@ export type CatalogProduct = {
   descriptionHtml: string;
   vendor: string;
   productType: string;
+  category: CatalogCategory | null;
   tags: string[];
   status: "ACTIVE" | "ARCHIVED" | "DRAFT";
   totalInventory: number | null;
   options: CatalogOption[];
   variants: CatalogVariant[];
   images: CatalogImage[];
+  salesLast90Days: number;
+  salesTier: CatalogSalesTier;
 };
+
+export type CatalogCategory = {
+  id: string;
+  name: string;
+  fullName: string;
+};
+
+export type CatalogSalesTier = "A" | "B" | "C" | "D" | "E";
 
 export type CatalogResult = {
   products: CatalogProduct[];
@@ -73,6 +84,7 @@ type CaptainProductNode = {
   descriptionHtml?: string | null;
   vendor?: string | null;
   productType?: string | null;
+  category?: CatalogCategory | null;
   tags?: string[] | null;
   status?: CatalogProduct["status"] | null;
   totalInventory?: number | null;
@@ -96,6 +108,28 @@ type CaptainMediaNode = {
   } | null;
 };
 
+type CaptainOrdersResponse = {
+  errors?: Array<{ message: string }>;
+  data?: {
+    orders?: {
+      pageInfo?: {
+        hasNextPage?: boolean;
+        endCursor?: string | null;
+      };
+      nodes?: Array<{
+        lineItems?: {
+          nodes?: Array<{
+            quantity?: number | null;
+            product?: {
+              id?: string | null;
+            } | null;
+          }> | null;
+        } | null;
+      }> | null;
+    } | null;
+  };
+};
+
 const captainShop =
   process.env.CAPTAIN_CASKWELL_SHOP_DOMAIN ?? "captaincaskwell.myshopify.com";
 const captainApiVersion =
@@ -106,6 +140,14 @@ const emptyPageInfo = {
   hasPreviousPage: false,
   startCursor: null,
   endCursor: null,
+};
+
+const salesCache: {
+  expiresAt: number;
+  counts: Map<string, number>;
+} = {
+  expiresAt: 0,
+  counts: new Map(),
 };
 
 export async function getCaptainProducts(
@@ -164,6 +206,11 @@ export async function getCaptainProducts(
                 descriptionHtml
                 vendor
                 productType
+                category {
+                  id
+                  name
+                  fullName
+                }
                 tags
                 status
                 totalInventory
@@ -236,10 +283,23 @@ export async function getCaptainProducts(
     };
   }
 
-  const products = (json.data?.products?.nodes ?? []).map(normalizeProduct);
+  const productNodes = (json.data?.products?.nodes ?? []) as CaptainProductNode[];
+  const products: CatalogProduct[] = productNodes.map(normalizeProduct);
+  const salesCounts = await getCaptainSalesCounts(
+    products.map((product) => product.id),
+  );
+  const productsWithSales = products.map((product) => {
+    const salesLast90Days = salesCounts.get(product.id) ?? 0;
+
+    return {
+      ...product,
+      salesLast90Days,
+      salesTier: salesTierForQuantity(salesLast90Days),
+    };
+  });
 
   return {
-    products: filterProducts(products, filters),
+    products: filterProducts(productsWithSales, filters),
     pageInfo: json.data?.products?.pageInfo ?? emptyPageInfo,
   };
 }
@@ -301,6 +361,13 @@ function normalizeProduct(product: CaptainProductNode): CatalogProduct {
     descriptionHtml: product.descriptionHtml ?? "",
     vendor: product.vendor ?? "",
     productType: product.productType ?? "",
+    category: product.category
+      ? {
+          id: product.category.id,
+          name: product.category.name,
+          fullName: product.category.fullName,
+        }
+      : null,
     tags: product.tags ?? [],
     status: product.status ?? "DRAFT",
     totalInventory: product.totalInventory ?? null,
@@ -318,6 +385,8 @@ function normalizeProduct(product: CaptainProductNode): CatalogProduct {
           altText: media.image?.altText ?? media.alt ?? null,
         }];
       }),
+    salesLast90Days: 0,
+    salesTier: "E",
   };
 }
 
@@ -379,4 +448,124 @@ function filterProductsByInventory(
 
     return product.totalInventory === 0;
   });
+}
+
+async function getCaptainSalesCounts(productIds: string[]) {
+  const requested = new Set(productIds);
+  if (!requested.size) {
+    return new Map<string, number>();
+  }
+
+  if (salesCache.expiresAt > Date.now()) {
+    return filterSalesCounts(salesCache.counts, requested);
+  }
+
+  const accessToken = process.env.CAPTAIN_CASKWELL_ADMIN_ACCESS_TOKEN;
+  if (!accessToken) {
+    return new Map<string, number>();
+  }
+
+  const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  const counts = new Map<string, number>();
+  let after: string | null = null;
+  let pages = 0;
+  const pageLimit = Number.parseInt(
+    process.env.CAPTAIN_CASKWELL_SALES_PAGE_LIMIT ?? "25",
+    10,
+  );
+
+  while (pages < pageLimit) {
+    pages += 1;
+    const response: Response = await fetch(
+      `https://${captainShop}/admin/api/${captainApiVersion}/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": accessToken,
+        },
+        body: JSON.stringify({
+          query: `#graphql
+            query CaptainSalesLast90Days($after: String, $query: String!) {
+              orders(first: 100, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  lineItems(first: 100) {
+                    nodes {
+                      quantity
+                      product {
+                        id
+                      }
+                    }
+                  }
+                }
+              }
+            }`,
+          variables: {
+            after,
+            query: `created_at:>=${since} status:any`,
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      break;
+    }
+
+    const json = (await response.json()) as CaptainOrdersResponse;
+    if (json.errors?.length) {
+      break;
+    }
+
+    for (const order of json.data?.orders?.nodes ?? []) {
+      for (const item of order.lineItems?.nodes ?? []) {
+        const productId = item.product?.id;
+        if (!productId) {
+          continue;
+        }
+
+        counts.set(productId, (counts.get(productId) ?? 0) + (item.quantity ?? 0));
+      }
+    }
+
+    if (!json.data?.orders?.pageInfo?.hasNextPage) {
+      break;
+    }
+
+    after = json.data.orders.pageInfo.endCursor ?? null;
+  }
+
+  salesCache.counts = counts;
+  salesCache.expiresAt = Date.now() + 10 * 60 * 1000;
+
+  return filterSalesCounts(counts, requested);
+}
+
+function filterSalesCounts(counts: Map<string, number>, productIds: Set<string>) {
+  return new Map(
+    [...counts.entries()].filter(([productId]) => productIds.has(productId)),
+  );
+}
+
+function salesTierForQuantity(quantity: number): CatalogSalesTier {
+  if (quantity >= 601) {
+    return "A";
+  }
+  if (quantity >= 401) {
+    return "B";
+  }
+  if (quantity >= 301) {
+    return "C";
+  }
+  if (quantity >= 101) {
+    return "D";
+  }
+
+  return "E";
 }
