@@ -1,0 +1,11 @@
+.cache
+build
+node_modules
+.env
+.env.*
+.git
+.shopify
+.react-router
+build
+prisma/dev.sqlite
+prisma/dev.sqlite-journal
