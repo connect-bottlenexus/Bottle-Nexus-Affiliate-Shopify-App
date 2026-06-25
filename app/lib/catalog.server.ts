@@ -19,6 +19,8 @@ export type CatalogVariant = {
   compareAtPrice: string | null;
   taxable: boolean;
   inventoryPolicy: "CONTINUE" | "DENY";
+  inventoryQuantity: number | null;
+  inventoryTracked: boolean;
   selectedOptions: Array<{ name: string; value: string }>;
 };
 
@@ -52,10 +54,9 @@ export type CatalogFilters = {
   search?: string;
   vendor?: string;
   productType?: string;
+  status?: "ACTIVE" | "DRAFT";
   inventory?: "in_stock" | "out_of_stock" | "not_tracked";
   importState?: "imported" | "not_imported";
-  minPrice?: string;
-  maxPrice?: string;
   after?: string;
   before?: string;
 };
@@ -76,8 +77,14 @@ type CaptainProductNode = {
   status?: CatalogProduct["status"] | null;
   totalInventory?: number | null;
   options?: CatalogOption[] | null;
-  variants?: { nodes?: CatalogVariant[] | null } | null;
+  variants?: { nodes?: CaptainVariantNode[] | null } | null;
   media?: { nodes?: CaptainMediaNode[] | null } | null;
+};
+
+type CaptainVariantNode = Omit<CatalogVariant, "inventoryTracked"> & {
+  inventoryItem?: {
+    tracked?: boolean | null;
+  } | null;
 };
 
 type CaptainMediaNode = {
@@ -175,6 +182,10 @@ export async function getCaptainProducts(
                     compareAtPrice
                     taxable
                     inventoryPolicy
+                    inventoryQuantity
+                    inventoryItem {
+                      tracked
+                    }
                     selectedOptions {
                       name
                       value
@@ -294,7 +305,7 @@ function normalizeProduct(product: CaptainProductNode): CatalogProduct {
     status: product.status ?? "DRAFT",
     totalInventory: product.totalInventory ?? null,
     options: product.options ?? [],
-    variants: product.variants?.nodes ?? [],
+    variants: (product.variants?.nodes ?? []).map(normalizeVariant),
     images: (product.media?.nodes ?? [])
       .flatMap((media) => {
         if (!media.image?.url) {
@@ -310,6 +321,22 @@ function normalizeProduct(product: CaptainProductNode): CatalogProduct {
   };
 }
 
+function normalizeVariant(variant: CaptainVariantNode): CatalogVariant {
+  return {
+    id: variant.id,
+    title: variant.title,
+    sku: variant.sku,
+    barcode: variant.barcode,
+    price: variant.price,
+    compareAtPrice: variant.compareAtPrice,
+    taxable: variant.taxable,
+    inventoryPolicy: variant.inventoryPolicy,
+    inventoryQuantity: variant.inventoryQuantity ?? null,
+    inventoryTracked: variant.inventoryItem?.tracked ?? false,
+    selectedOptions: variant.selectedOptions,
+  };
+}
+
 function buildProductQuery(filters: CatalogFilters) {
   const parts = [
     filters.search?.trim(),
@@ -317,6 +344,7 @@ function buildProductQuery(filters: CatalogFilters) {
     filters.productType
       ? `product_type:${quoteQueryValue(filters.productType)}`
       : "",
+    filters.status ? `status:${filters.status.toLowerCase()}` : "",
   ];
 
   return parts.filter(Boolean).join(" ");
@@ -330,7 +358,7 @@ function filterProducts(
   products: CatalogProduct[],
   filters: CatalogFilters,
 ) {
-  return filterProductsByPrice(filterProductsByInventory(products, filters), filters);
+  return filterProductsByInventory(products, filters);
 }
 
 function filterProductsByInventory(
@@ -351,38 +379,4 @@ function filterProductsByInventory(
 
     return product.totalInventory === 0;
   });
-}
-
-function filterProductsByPrice(
-  products: CatalogProduct[],
-  filters: CatalogFilters,
-) {
-  const minPrice = parsePrice(filters.minPrice);
-  const maxPrice = parsePrice(filters.maxPrice);
-
-  if (minPrice === null && maxPrice === null) {
-    return products;
-  }
-
-  return products.filter((product) =>
-    product.variants.some((variant) => {
-      const price = Number.parseFloat(variant.price);
-      if (Number.isNaN(price)) {
-        return false;
-      }
-      if (minPrice !== null && price < minPrice) {
-        return false;
-      }
-      return !(maxPrice !== null && price > maxPrice);
-    }),
-  );
-}
-
-function parsePrice(value: string | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Number.parseFloat(value);
-  return Number.isNaN(parsed) ? null : parsed;
 }

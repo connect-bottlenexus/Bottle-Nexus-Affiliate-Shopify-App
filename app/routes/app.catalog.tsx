@@ -210,6 +210,16 @@ export default function Catalog() {
                 ))}
               </select>
               <select
+                aria-label="Filter by product status"
+                defaultValue={filters.status ?? ""}
+                name="status"
+                style={styles.compactInput}
+              >
+                <option value="">All statuses</option>
+                <option value="ACTIVE">Active</option>
+                <option value="DRAFT">Draft</option>
+              </select>
+              <select
                 aria-label="Filter by inventory"
                 defaultValue={filters.inventory ?? ""}
                 name="inventory"
@@ -228,28 +238,8 @@ export default function Catalog() {
               >
                 <option value="">All imports</option>
                 <option value="imported">Imported</option>
-                <option value="not_imported">Not imported</option>
-              </select>
-              <input
-                aria-label="Minimum price"
-                defaultValue={filters.minPrice ?? ""}
-                min="0"
-                name="min"
-                placeholder="Min price"
-                step="0.01"
-                style={styles.priceInput}
-                type="number"
-              />
-              <input
-                aria-label="Maximum price"
-                defaultValue={filters.maxPrice ?? ""}
-                min="0"
-                name="max"
-                placeholder="Max price"
-                step="0.01"
-                style={styles.priceInput}
-                type="number"
-              />
+                  <option value="not_imported">Not imported</option>
+                </select>
               <button style={styles.iconButton} title="Apply filters" type="submit">
                 Apply
               </button>
@@ -272,7 +262,6 @@ export default function Catalog() {
                     </th>
                     <th style={styles.productHeaderCell}>Product</th>
                     <th style={styles.headerCell}>Status</th>
-                    <th style={styles.numericHeaderCell}>Price</th>
                     <th style={styles.headerCell}>Inventory</th>
                     <th style={styles.numericHeaderCell}>Variants</th>
                     <th style={styles.headerCell}>Product type</th>
@@ -284,7 +273,6 @@ export default function Catalog() {
                   {products.map((product) => {
                     const checked = selected.has(product.id);
                     const image = product.images[0];
-                    const firstPrice = product.variants[0]?.price ?? "-";
 
                     return (
                       <tr key={product.id} style={styles.row}>
@@ -320,7 +308,6 @@ export default function Catalog() {
                             {capitalize(product.status)}
                           </span>
                         </td>
-                        <td style={styles.numericCell}>{firstPrice}</td>
                         <td style={styles.cell}>
                           {product.totalInventory ?? "Not tracked"}
                         </td>
@@ -390,10 +377,9 @@ function readCatalogFilters(url: URL): CatalogFilters {
     search: url.searchParams.get("q") || undefined,
     vendor: url.searchParams.get("vendor") || undefined,
     productType: url.searchParams.get("type") || undefined,
+    status: readProductStatusFilter(url.searchParams.get("status")),
     inventory: readInventoryFilter(url.searchParams.get("inventory")),
     importState: readImportStateFilter(url.searchParams.get("imported")),
-    minPrice: url.searchParams.get("min") || undefined,
-    maxPrice: url.searchParams.get("max") || undefined,
     after: url.searchParams.get("after") || undefined,
     before: url.searchParams.get("before") || undefined,
   };
@@ -427,6 +413,14 @@ function importStatusLabel(status: string) {
 
 function readInventoryFilter(value: string | null): CatalogFilters["inventory"] {
   if (value === "in_stock" || value === "out_of_stock" || value === "not_tracked") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function readProductStatusFilter(value: string | null): CatalogFilters["status"] {
+  if (value === "ACTIVE" || value === "DRAFT") {
     return value;
   }
 
@@ -561,15 +555,6 @@ const styles: Record<string, CSSProperties> = {
     font: "inherit",
     height: "32px",
     minWidth: "132px",
-    padding: "0 10px",
-  },
-  priceInput: {
-    border: "1px solid #c9cccf",
-    borderRadius: "8px",
-    flex: "0 1 112px",
-    font: "inherit",
-    height: "32px",
-    minWidth: "96px",
     padding: "0 10px",
   },
   iconButton: {

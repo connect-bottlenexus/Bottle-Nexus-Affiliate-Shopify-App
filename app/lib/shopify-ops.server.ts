@@ -10,6 +10,14 @@ type AdminClient = {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response>;
 };
 
+type ImportedVariantNode = {
+  id: string;
+  selectedOptions: Array<{ name: string; value: string }>;
+  inventoryItem?: {
+    id: string;
+  } | null;
+};
+
 export type ImportResult = {
   ok: boolean;
   message: string;
@@ -71,61 +79,16 @@ export async function upsertPolicyPage(
 ): Promise<ImportResult> {
   const policy = getPolicyTemplate(key);
   const body = bodyHtml?.trim() || renderPolicyBody(key, profile);
-  const existingPage = await findPageByHandle(admin, policy.handle);
-
-  if (existingPage?.id) {
-    const response = await admin.graphql(
-      `#graphql
-        mutation UpdatePage($id: ID!, $page: PageUpdateInput!) {
-          pageUpdate(id: $id, page: $page) {
-            page {
-              id
-              title
-              handle
-            }
-            userErrors {
-              code
-              field
-              message
-            }
-          }
-        }`,
-      {
-        variables: {
-          id: existingPage.id,
-          page: {
-            title: policy.title,
-            handle: policy.handle,
-            body,
-            isPublished: true,
-          },
-        },
-      },
-    );
-    const json = await response.json();
-    const errors = extractErrors(json.data?.pageUpdate?.userErrors);
-    if (errors.length) {
-      return { ok: false, message: errors.join("; ") };
-    }
-
-    return {
-      ok: true,
-      id: json.data?.pageUpdate?.page?.id,
-      message: `${policy.title} updated.`,
-    };
-  }
 
   const response = await admin.graphql(
     `#graphql
-      mutation CreatePage($page: PageCreateInput!) {
-        pageCreate(page: $page) {
-          page {
+      mutation UpdateShopPolicy($shopPolicy: ShopPolicyInput!) {
+        shopPolicyUpdate(shopPolicy: $shopPolicy) {
+          shopPolicy {
             id
-            title
-            handle
+            type
           }
           userErrors {
-            code
             field
             message
           }
@@ -133,26 +96,38 @@ export async function upsertPolicyPage(
       }`,
     {
       variables: {
-        page: {
-          title: policy.title,
-          handle: policy.handle,
+        shopPolicy: {
+          type: shopPolicyTypeForKey(key),
           body,
-          isPublished: true,
         },
       },
     },
   );
   const json = await response.json();
-  const errors = extractErrors(json.data?.pageCreate?.userErrors);
+  const errors = [
+    ...extractTopLevelErrors(json.errors),
+    ...extractErrors(json.data?.shopPolicyUpdate?.userErrors),
+  ];
   if (errors.length) {
     return { ok: false, message: errors.join("; ") };
   }
 
   return {
     ok: true,
-    id: json.data?.pageCreate?.page?.id,
-    message: `${policy.title} created.`,
+    id: json.data?.shopPolicyUpdate?.shopPolicy?.id,
+    message: `${policy.title} updated in store policies.`,
   };
+}
+
+function shopPolicyTypeForKey(key: PolicyKey) {
+  const types: Record<PolicyKey, string> = {
+    privacy: "PRIVACY_POLICY",
+    terms: "TERMS_OF_SERVICE",
+    shipping: "SHIPPING_POLICY",
+    refund: "REFUND_POLICY",
+  };
+
+  return types[key];
 }
 
 export async function importProducts(
@@ -164,16 +139,18 @@ export async function importProducts(
   for (const product of products) {
     const existingProduct = await findProductByHandle(admin, product.handle);
     if (existingProduct?.id) {
+      const inventoryErrors = await syncProductInventory(admin, existingProduct.id, product);
       const visibilityErrors = await ensureProductVisible(admin, existingProduct.id);
+      const errors = [...inventoryErrors, ...visibilityErrors];
       results.push({
-        ok: visibilityErrors.length === 0,
+        ok: errors.length === 0,
         id: existingProduct.id,
         sourceProductId: product.id,
         sourceHandle: product.handle,
         title: product.title,
-        message: visibilityErrors.length
-          ? `${product.title} already exists, but publishing needs review: ${visibilityErrors.join("; ")}`
-          : `${product.title} already exists and is published to Online Store.`,
+        message: errors.length
+          ? `${product.title} already exists, but sync needs review: ${errors.join("; ")}`
+          : `${product.title} already exists, inventory is synced, and it is published to Online Store.`,
       });
       continue;
     }
@@ -188,23 +165,6 @@ export async function importProducts(
   }
 
   return results;
-}
-
-async function findPageByHandle(admin: AdminClient, handle: string) {
-  const response = await admin.graphql(
-    `#graphql
-      query PageByHandle($query: String!) {
-        pages(first: 1, query: $query) {
-          nodes {
-            id
-            handle
-          }
-        }
-      }`,
-    { variables: { query: `handle:${handle}` } },
-  );
-  const json = await response.json();
-  return json.data?.pages?.nodes?.[0] ?? null;
 }
 
 async function findProductByHandle(admin: AdminClient, handle: string) {
@@ -310,6 +270,15 @@ async function createProduct(
       ok: false,
       id: createdProduct.id,
       message: `${sourceProduct.title} was created, but variant sync needs review: ${variantErrors.join("; ")}`,
+    };
+  }
+
+  const inventoryErrors = await syncProductInventory(admin, createdProduct.id, sourceProduct);
+  if (inventoryErrors.length) {
+    return {
+      ok: false,
+      id: createdProduct.id,
+      message: `${sourceProduct.title} was created, but inventory sync needs review: ${inventoryErrors.join("; ")}`,
     };
   }
 
@@ -512,15 +481,222 @@ function mapVariantInput(variant: CatalogVariant, includeOptions = true) {
           })),
         }
       : {}),
-    price: variant.price,
-    compareAtPrice: variant.compareAtPrice,
     barcode: variant.barcode,
     taxable: variant.taxable,
     inventoryPolicy: variant.inventoryPolicy,
     inventoryItem: {
       sku: variant.sku,
+      tracked: variant.inventoryTracked,
     },
   };
+}
+
+async function syncProductInventory(
+  admin: AdminClient,
+  productId: string,
+  sourceProduct: CatalogProduct,
+) {
+  const locationResult = await getInventorySyncLocation(admin);
+  if (locationResult.errors.length) {
+    return locationResult.errors;
+  }
+  if (!locationResult.locationId) {
+    return ["No active inventory location was found for this store."];
+  }
+
+  const variantResult = await getProductInventoryVariants(admin, productId);
+  if (variantResult.errors.length) {
+    return variantResult.errors;
+  }
+
+  const errors: string[] = [];
+  const sourceByOptions = new Map(
+    sourceProduct.variants.map((variant) => [variantOptionsKey(variant.selectedOptions), variant]),
+  );
+
+  for (const importedVariant of variantResult.variants) {
+    const sourceVariant =
+      sourceByOptions.get(variantOptionsKey(importedVariant.selectedOptions)) ??
+      sourceProduct.variants[0];
+    const inventoryItemId = importedVariant.inventoryItem?.id;
+
+    if (!sourceVariant?.inventoryTracked || !inventoryItemId) {
+      continue;
+    }
+
+    const quantity =
+      sourceVariant.inventoryQuantity ??
+      (sourceProduct.variants.length === 1 ? sourceProduct.totalInventory : null) ??
+      0;
+
+    const activateErrors = await activateInventoryAtLocation(
+      admin,
+      inventoryItemId,
+      locationResult.locationId,
+      quantity,
+    );
+    const blockingActivateErrors = activateErrors.filter(
+      (error) => !/already (active|connected|stocked)|has already been taken/i.test(error),
+    );
+    if (blockingActivateErrors.length) {
+      errors.push(...blockingActivateErrors);
+      continue;
+    }
+
+    const quantityErrors = await setInventoryQuantity(
+      admin,
+      inventoryItemId,
+      locationResult.locationId,
+      quantity,
+      sourceProduct.id,
+    );
+    errors.push(...quantityErrors);
+  }
+
+  return errors;
+}
+
+async function getInventorySyncLocation(admin: AdminClient) {
+  const response = await admin.graphql(`#graphql
+    query InventorySyncLocation {
+      locations(first: 25) {
+        nodes {
+          id
+        }
+      }
+    }`);
+  const json = await response.json();
+  const locations = (json.data?.locations?.nodes ?? []) as Array<{
+    id: string;
+  }>;
+  const location = locations[0];
+
+  return {
+    locationId: location?.id ?? null,
+    errors: extractTopLevelErrors(json.errors),
+  };
+}
+
+async function getProductInventoryVariants(admin: AdminClient, productId: string) {
+  const response = await admin.graphql(
+    `#graphql
+      query ImportedProductInventoryVariants($id: ID!) {
+        product(id: $id) {
+          variants(first: 100) {
+            nodes {
+              id
+              selectedOptions {
+                name
+                value
+              }
+              inventoryItem {
+                id
+              }
+            }
+          }
+        }
+      }`,
+    { variables: { id: productId } },
+  );
+  const json = await response.json();
+
+  return {
+    variants: (json.data?.product?.variants?.nodes ?? []) as ImportedVariantNode[],
+    errors: extractTopLevelErrors(json.errors),
+  };
+}
+
+async function activateInventoryAtLocation(
+  admin: AdminClient,
+  inventoryItemId: string,
+  locationId: string,
+  quantity: number,
+) {
+  const response = await admin.graphql(
+    `#graphql
+      mutation ActivateInventoryItem($inventoryItemId: ID!, $locationId: ID!, $available: Int) {
+        inventoryActivate(
+          inventoryItemId: $inventoryItemId
+          locationId: $locationId
+          available: $available
+        ) {
+          inventoryLevel {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+    {
+      variables: {
+        inventoryItemId,
+        locationId,
+        available: Math.max(0, quantity),
+      },
+    },
+  );
+  const json = await response.json();
+
+  return [
+    ...extractTopLevelErrors(json.errors),
+    ...extractErrors(json.data?.inventoryActivate?.userErrors),
+  ];
+}
+
+async function setInventoryQuantity(
+  admin: AdminClient,
+  inventoryItemId: string,
+  locationId: string,
+  quantity: number,
+  sourceProductId: string,
+) {
+  const response = await admin.graphql(
+    `#graphql
+      mutation SetImportedInventory($input: InventorySetQuantitiesInput!) {
+        inventorySetQuantities(input: $input) {
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+    {
+      variables: {
+        input: {
+          ignoreCompareQuantity: true,
+          name: "available",
+          reason: "correction",
+          referenceDocumentUri: `gid://bottle-nexus-affiliate/CaptainCaskwellProduct/${sourceProductId.replace(
+            "gid://shopify/Product/",
+            "",
+          )}`,
+          quantities: [
+            {
+              inventoryItemId,
+              locationId,
+              quantity: Math.max(0, quantity),
+              compareQuantity: null,
+            },
+          ],
+        },
+      },
+    },
+  );
+  const json = await response.json();
+
+  return [
+    ...extractTopLevelErrors(json.errors),
+    ...extractErrors(json.data?.inventorySetQuantities?.userErrors),
+  ];
+}
+
+function variantOptionsKey(options: Array<{ name: string; value: string }>) {
+  return options
+    .map((option) => `${option.name}:${option.value}`)
+    .sort()
+    .join("|");
 }
 
 function extractErrors(errors: Array<{ message: string }> | undefined) {
