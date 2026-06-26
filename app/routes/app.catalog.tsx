@@ -234,6 +234,19 @@ export default function Catalog() {
                 <option value="DRAFT">Draft</option>
               </select>
               <select
+                aria-label="Filter by ranking"
+                defaultValue={filters.rank ?? ""}
+                name="rank"
+                style={styles.compactInput}
+              >
+                <option value="">All ranks</option>
+                <option value="A">Rank A</option>
+                <option value="B">Rank B</option>
+                <option value="C">Rank C</option>
+                <option value="D">Rank D</option>
+                <option value="E">Rank E</option>
+              </select>
+              <select
                 aria-label="Filter by inventory"
                 defaultValue={filters.inventory ?? ""}
                 name="inventory"
@@ -276,7 +289,15 @@ export default function Catalog() {
                     </th>
                     <th style={styles.productHeaderCell}>Product</th>
                     <th style={styles.headerCell}>Status</th>
-                    <th style={styles.headerCell}>Rank</th>
+                    <th style={styles.headerCell}>
+                      <a
+                        aria-label={`Sort by rank ${nextRankSort(filters.rankSort) === "desc" ? "A to E" : "E to A"}`}
+                        href={rankSortUrl(searchParams, filters.rankSort)}
+                        style={styles.sortLink}
+                      >
+                        Rank {rankSortIndicator(filters.rankSort)}
+                      </a>
+                    </th>
                     <th style={styles.headerCell}>Inventory</th>
                     <th style={styles.numericHeaderCell}>Variants</th>
                     <th style={styles.headerCell}>Product type</th>
@@ -404,6 +425,8 @@ function readCatalogFilters(url: URL): CatalogFilters {
     vendor: url.searchParams.get("vendor") || undefined,
     productType: url.searchParams.get("type") || undefined,
     status: readProductStatusFilter(url.searchParams.get("status")),
+    rank: readRankFilter(url.searchParams.get("rank")),
+    rankSort: readRankSort(url.searchParams.get("rankSort")),
     inventory: readInventoryFilter(url.searchParams.get("inventory")),
     importState: readImportStateFilter(url.searchParams.get("imported")),
     after: url.searchParams.get("after") || undefined,
@@ -453,6 +476,22 @@ function readProductStatusFilter(value: string | null): CatalogFilters["status"]
   return undefined;
 }
 
+function readRankFilter(value: string | null): CatalogFilters["rank"] {
+  if (value === "A" || value === "B" || value === "C" || value === "D" || value === "E") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function readRankSort(value: string | null): CatalogFilters["rankSort"] {
+  if (value === "asc" || value === "desc") {
+    return value;
+  }
+
+  return undefined;
+}
+
 function readImportStateFilter(value: string | null): CatalogFilters["importState"] {
   if (value === "imported" || value === "not_imported") {
     return value;
@@ -474,6 +513,34 @@ function pageUrl(
   }
   const query = next.toString();
   return query ? `/app/catalog?${query}` : "/app/catalog";
+}
+
+function rankSortUrl(
+  searchParams: URLSearchParams,
+  current: CatalogFilters["rankSort"],
+) {
+  const next = new URLSearchParams(searchParams);
+  next.delete("after");
+  next.delete("before");
+  next.set("rankSort", nextRankSort(current));
+  const query = next.toString();
+
+  return query ? `/app/catalog?${query}` : "/app/catalog";
+}
+
+function nextRankSort(current: CatalogFilters["rankSort"]) {
+  return current === "desc" ? "asc" : "desc";
+}
+
+function rankSortIndicator(current: CatalogFilters["rankSort"]) {
+  if (current === "desc") {
+    return "↓";
+  }
+  if (current === "asc") {
+    return "↑";
+  }
+
+  return "";
 }
 
 function capitalize(value: string) {
@@ -648,6 +715,12 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 600,
     padding: "8px 12px",
     textAlign: "left",
+  },
+  sortLink: {
+    color: "inherit",
+    display: "inline-flex",
+    gap: "4px",
+    textDecoration: "none",
   },
   productHeaderCell: {
     background: "#f7f7f7",

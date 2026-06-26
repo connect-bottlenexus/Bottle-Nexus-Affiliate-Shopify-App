@@ -66,6 +66,8 @@ export type CatalogFilters = {
   vendor?: string;
   productType?: string;
   status?: "ACTIVE" | "DRAFT";
+  rank?: CatalogSalesTier;
+  rankSort?: "asc" | "desc";
   inventory?: "in_stock" | "out_of_stock" | "not_tracked";
   importState?: "imported" | "not_imported";
   after?: string;
@@ -427,7 +429,10 @@ function filterProducts(
   products: CatalogProduct[],
   filters: CatalogFilters,
 ) {
-  return filterProductsByInventory(products, filters);
+  return sortProductsByRank(
+    filterProductsByRank(filterProductsByInventory(products, filters), filters),
+    filters,
+  );
 }
 
 function filterProductsByInventory(
@@ -447,6 +452,41 @@ function filterProductsByInventory(
     }
 
     return product.totalInventory === 0;
+  });
+}
+
+function filterProductsByRank(
+  products: CatalogProduct[],
+  filters: CatalogFilters,
+) {
+  if (!filters.rank) {
+    return products;
+  }
+
+  return products.filter((product) => product.salesTier === filters.rank);
+}
+
+function sortProductsByRank(
+  products: CatalogProduct[],
+  filters: CatalogFilters,
+) {
+  if (!filters.rankSort) {
+    return products;
+  }
+
+  const direction = filters.rankSort === "asc" ? 1 : -1;
+  return [...products].sort((first, second) => {
+    const rankComparison =
+      tierRankValue(first.salesTier) - tierRankValue(second.salesTier);
+
+    if (rankComparison !== 0) {
+      return rankComparison * direction;
+    }
+
+    return (
+      (second.salesLast90Days - first.salesLast90Days) *
+      (filters.rankSort === "asc" ? -1 : 1)
+    );
   });
 }
 
@@ -568,4 +608,16 @@ function salesTierForQuantity(quantity: number): CatalogSalesTier {
   }
 
   return "E";
+}
+
+function tierRankValue(tier: CatalogSalesTier) {
+  const ranks: Record<CatalogSalesTier, number> = {
+    A: 5,
+    B: 4,
+    C: 3,
+    D: 2,
+    E: 1,
+  };
+
+  return ranks[tier];
 }
