@@ -132,6 +132,16 @@ type CaptainOrdersResponse = {
   };
 };
 
+type CaptainProductsResponse = {
+  errors?: Array<{ message: string }>;
+  data?: {
+    products?: {
+      pageInfo?: CatalogResult["pageInfo"];
+      nodes?: CaptainProductNode[] | null;
+    } | null;
+  };
+};
+
 const captainShop =
   process.env.CAPTAIN_CASKWELL_SHOP_DOMAIN ?? "captaincaskwell.myshopify.com";
 const captainApiVersion =
@@ -168,6 +178,10 @@ export async function getCaptainProducts(
   }
 
   const queryText = buildProductQuery(filters);
+  if (hasDerivedCatalogFilter(filters)) {
+    return getDerivedCaptainProducts(accessToken, queryText, filters, limit);
+  }
+
   const usesPreviousPage = Boolean(filters.before);
 
   const response = await fetch(
@@ -275,7 +289,7 @@ export async function getCaptainProducts(
     };
   }
 
-  const json = await response.json();
+  const json = (await response.json()) as CaptainProductsResponse;
 
   if (json.errors?.length) {
     return {
@@ -285,7 +299,7 @@ export async function getCaptainProducts(
     };
   }
 
-  const productNodes = (json.data?.products?.nodes ?? []) as CaptainProductNode[];
+  const productNodes = json.data?.products?.nodes ?? [];
   const products: CatalogProduct[] = productNodes.map(normalizeProduct);
   const salesCounts = await getCaptainSalesCounts(
     products.map((product) => product.id),
@@ -303,6 +317,160 @@ export async function getCaptainProducts(
   return {
     products: filterProducts(productsWithSales, filters),
     pageInfo: json.data?.products?.pageInfo ?? emptyPageInfo,
+  };
+}
+
+async function getDerivedCaptainProducts(
+  accessToken: string,
+  queryText: string,
+  filters: CatalogFilters,
+  limit: number,
+): Promise<CatalogResult> {
+  const productNodes: CaptainProductNode[] = [];
+  let after: string | null = null;
+  let pages = 0;
+  const pageLimit = Number.parseInt(
+    process.env.CAPTAIN_CASKWELL_RANK_PRODUCT_PAGE_LIMIT ?? "20",
+    10,
+  );
+
+  while (pages < pageLimit) {
+    pages += 1;
+    const response: Response = await fetch(
+      `https://${captainShop}/admin/api/${captainApiVersion}/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": accessToken,
+        },
+        body: JSON.stringify({
+          query: `#graphql
+            query CaptainRankedProducts($first: Int!, $after: String, $query: String) {
+              products(first: $first, after: $after, query: $query, sortKey: TITLE) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  id
+                  title
+                  handle
+                  descriptionHtml
+                  vendor
+                  productType
+                  category {
+                    id
+                    name
+                    fullName
+                  }
+                  tags
+                  status
+                  totalInventory
+                  options {
+                    id
+                    name
+                    values
+                  }
+                  variants(first: 100) {
+                    nodes {
+                      id
+                      title
+                      sku
+                      barcode
+                      price
+                      compareAtPrice
+                      taxable
+                      inventoryPolicy
+                      inventoryQuantity
+                      inventoryItem {
+                        tracked
+                      }
+                      selectedOptions {
+                        name
+                        value
+                      }
+                    }
+                  }
+                  media(first: 10) {
+                    nodes {
+                      alt
+                      ... on MediaImage {
+                        id
+                        image {
+                          url
+                          altText
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }`,
+          variables: {
+            first: 250,
+            after,
+            query: queryText || null,
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      return {
+        products: [],
+        pageInfo: emptyPageInfo,
+        error: `Captain Caskwell Admin API returned ${response.status}. Check the source store token and scopes.`,
+      };
+    }
+
+    const json = (await response.json()) as CaptainProductsResponse;
+    if (json.errors?.length) {
+      return {
+        products: [],
+        pageInfo: emptyPageInfo,
+        error: json.errors.map((error) => error.message).join("; "),
+      };
+    }
+
+    productNodes.push(...(json.data?.products?.nodes ?? []));
+
+    if (!json.data?.products?.pageInfo?.hasNextPage) {
+      break;
+    }
+
+    after = json.data.products.pageInfo.endCursor ?? null;
+  }
+
+  const products = productNodes.map(normalizeProduct);
+  const salesCounts = await getCaptainSalesCounts(
+    products.map((product) => product.id),
+  );
+  const rankedProducts = products.map((product) => {
+    const salesLast90Days = salesCounts.get(product.id) ?? 0;
+
+    return {
+      ...product,
+      salesLast90Days,
+      salesTier: salesTierForQuantity(salesLast90Days),
+    };
+  });
+  const filtered = filterProducts(rankedProducts, {
+    ...filters,
+    after: undefined,
+    before: undefined,
+  });
+  const offset = rankPageOffset(filters, limit);
+  const productsPage = filtered.slice(offset, offset + limit);
+
+  return {
+    products: productsPage,
+    pageInfo: {
+      hasNextPage: offset + limit < filtered.length,
+      hasPreviousPage: offset > 0,
+      startCursor: encodeRankCursor(offset),
+      endCursor: encodeRankCursor(offset + limit),
+    },
   };
 }
 
@@ -433,6 +601,34 @@ function filterProducts(
     filterProductsByRank(filterProductsByInventory(products, filters), filters),
     filters,
   );
+}
+
+function hasDerivedCatalogFilter(filters: CatalogFilters) {
+  return Boolean(filters.rank || filters.rankSort);
+}
+
+function rankPageOffset(filters: CatalogFilters, limit: number) {
+  if (filters.before) {
+    return Math.max(0, decodeRankCursor(filters.before) - limit);
+  }
+  if (filters.after) {
+    return decodeRankCursor(filters.after);
+  }
+
+  return 0;
+}
+
+function encodeRankCursor(offset: number) {
+  return `rank:${Math.max(0, offset)}`;
+}
+
+function decodeRankCursor(cursor: string) {
+  if (!cursor.startsWith("rank:")) {
+    return 0;
+  }
+
+  const offset = Number.parseInt(cursor.slice(5), 10);
+  return Number.isFinite(offset) ? Math.max(0, offset) : 0;
 }
 
 function filterProductsByInventory(
