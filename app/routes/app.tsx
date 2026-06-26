@@ -29,6 +29,7 @@ export default function App() {
         <s-link href="/app">Dashboard</s-link>
         <s-link href="/app/policies">Policy pages</s-link>
         <s-link href="/app/catalog">Import Catalog</s-link>
+        <s-link href="/app/analytics">Analytics</s-link>
         <s-link href="/app/theme-import">Theme Import</s-link>
       </s-app-nav>
       <AppNavigation />
@@ -44,6 +45,7 @@ function AppNavigation() {
     { label: "Dashboard", path: "/app" },
     { label: "Policy pages", path: "/app/policies" },
     { label: "Import Catalog", path: "/app/catalog" },
+    { label: "Analytics", path: "/app/analytics" },
     { label: "Theme Import", path: "/app/theme-import" },
   ];
 
