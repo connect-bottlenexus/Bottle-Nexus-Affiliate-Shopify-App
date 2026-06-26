@@ -139,7 +139,7 @@ export default function Catalog() {
 
     setLastTierToast(key);
     shopify.toast.show(
-      `${product.salesTier} ranking: ${tierDescription(product.salesTier)} ${product.salesLast90Days} bottle(s) sold in the past 90 days.`,
+      `${product.salesTier} ranking: ${tierDescription(product.salesTier)}`,
     );
   }
 
